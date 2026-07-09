@@ -1,0 +1,1000 @@
+#!/usr/bin/env python3
+import curses
+import os
+import shutil
+import stat
+import time
+import fnmatch
+import os.path
+import sys
+import locale
+APP_TITLE, SORT_KEYS = "Wsl Commander", ["name", "ext", "size", "date"]
+COLOR_HEADER, COLOR_ACTIVE_PANEL, COLOR_INACTIVE_PANEL = 1, 2, 3
+COLOR_SELECTED, COLOR_DIRECTORY, COLOR_FILE = 4, 5, 6
+COLOR_STATUS, COLOR_DIALOG, COLOR_VIEWER, COLOR_SEPARATOR = 7, 8, 9, 10
+def _safe_text(value):
+    try:
+        return "" if value is None else str(value)
+    except Exception:
+        return ""
+def _terminal_encoding():
+    return locale.getpreferredencoding(False) or "utf-8"
+def _abspath(path):
+    try:
+        return os.path.abspath(os.path.expanduser(path))
+    except Exception:
+        return os.getcwd()
+def _shorten_left(text, width):
+    text = _safe_text(text)
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return text[-1:]
+    return "~" + text[-(width - 1):]
+def _shorten_right(text, width):
+    text = _safe_text(text)
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    if width == 1:
+        return text[:1]
+    return text[:width - 1] + "~"
+def _basename(path):
+    return os.path.basename(path) or path
+def _split_name_ext(name):
+    if name in ("", ".", ".."):
+        return name, ""
+    if name.startswith(".") and name.count(".") == 1:
+        return name, ""
+    root, ext = os.path.splitext(name)
+    if ext.startswith("."):
+        ext = ext[1:]
+    return root, ext
+def _safe_stat(path):
+    try:
+        return os.lstat(path)
+    except OSError:
+        return None
+def _is_dir_entry(path, st):
+    try:
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            return os.path.isdir(path)
+        if st is not None:
+            return stat.S_ISDIR(st.st_mode)
+        return os.path.isdir(path)
+    except OSError:
+        return False
+def _join_existing_dir(dst, src):
+    try:
+        if os.path.isdir(dst):
+            return os.path.join(dst, os.path.basename(src))
+    except OSError:
+        pass
+    return dst
+def _unique_destination(path):
+    if not os.path.exists(path):
+        return path
+    root, ext = os.path.splitext(path)
+    for i in range(1, 10000):
+        candidate = "%s_%d%s" % (root, i, ext)
+        if not os.path.exists(candidate):
+            return candidate
+    return path
+def format_size(b):
+    try:
+        b = int(b)
+    except Exception:
+        return ""
+    if b < 0:
+        return ""
+    units = ["B", "K", "M", "G", "T", "P"]
+    value = float(b)
+    index = 0
+    while value >= 1024.0 and index < len(units) - 1:
+        value /= 1024.0
+        index += 1
+    if index == 0:
+        return "%d" % b
+    if value >= 100:
+        return "%d%s" % (int(value), units[index])
+    if value >= 10:
+        return "%.1f%s" % (value, units[index])
+    return "%.2f%s" % (value, units[index])
+def format_date(ts):
+    try:
+        tm = time.localtime(ts)
+        now = time.localtime(time.time())
+        if tm.tm_year == now.tm_year:
+            return time.strftime("%m-%d %H:%M", tm)
+        return time.strftime("%Y-%m-%d", tm)
+    except Exception:
+        return ""
+def format_permissions(mode):
+    try:
+        return stat.filemode(mode)
+    except Exception:
+        return "----------"
+def _copy_regular_file(src, dst, cb):
+    total = 0
+    st = _safe_stat(src)
+    if st is not None:
+        total = st.st_size
+    done = 0
+    block = 1024 * 1024
+    parent = os.path.dirname(dst)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent)
+    with open(src, "rb") as fin:
+        with open(dst, "wb") as fout:
+            while True:
+                data = fin.read(block)
+                if not data:
+                    break
+                fout.write(data)
+                done += len(data)
+                if cb:
+                    cb(src, dst, done, total)
+    try:
+        shutil.copystat(src, dst)
+    except OSError:
+        pass
+def _copy_symlink(src, dst, cb):
+    parent = os.path.dirname(dst)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent)
+    try:
+        target = os.readlink(src)
+        if os.path.lexists(dst):
+            os.unlink(dst)
+        os.symlink(target, dst)
+        if cb:
+            cb(src, dst, 1, 1)
+    except OSError:
+        shutil.copy2(src, dst)
+def _copy_tree(src, dst, cb):
+    if os.path.exists(dst):
+        if not os.path.isdir(dst):
+            raise OSError("destination exists and is not a directory: %s" % dst)
+    else:
+        os.makedirs(dst)
+    try:
+        shutil.copystat(src, dst)
+    except OSError:
+        pass
+    names = os.listdir(src)
+    for name in names:
+        s = os.path.join(src, name)
+        d = os.path.join(dst, name)
+        st = _safe_stat(s)
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            _copy_symlink(s, d, cb)
+        elif _is_dir_entry(s, st):
+            _copy_tree(s, d, cb)
+        else:
+            _copy_regular_file(s, d, cb)
+def copy_file(src, dst, cb):
+    src = _abspath(src)
+    dst = _join_existing_dir(_abspath(dst), src)
+    if os.path.abspath(src) == os.path.abspath(dst):
+        dst = _unique_destination(dst)
+    st = _safe_stat(src)
+    if st is not None and stat.S_ISLNK(st.st_mode):
+        _copy_symlink(src, dst, cb)
+    elif os.path.isdir(src):
+        _copy_tree(src, dst, cb)
+    else:
+        _copy_regular_file(src, dst, cb)
+    return dst
+def move_file(src, dst, cb):
+    src = _abspath(src)
+    dst = _join_existing_dir(_abspath(dst), src)
+    if os.path.abspath(src) == os.path.abspath(dst):
+        return dst
+    parent = os.path.dirname(dst)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent)
+    try:
+        shutil.move(src, dst)
+        if cb:
+            cb(src, dst, 1, 1)
+    except OSError:
+        copied = copy_file(src, dst, cb)
+        delete_file(src)
+        dst = copied
+    return dst
+def delete_file(path):
+    path = _abspath(path)
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path)
+    else:
+        os.unlink(path)
+def create_directory(path):
+    path = _abspath(path)
+    os.makedirs(path)
+    return path
+def rename_file(old, new):
+    old = _abspath(old)
+    if not os.path.isabs(new):
+        new = os.path.join(os.path.dirname(old), new)
+    new = _abspath(new)
+    os.rename(old, new)
+    return new
+class App:
+    def __init__(self, screen):
+        self.screen = screen
+        self.running = True
+        self.message = ""
+        self.message_until = 0
+    def set_message(self, text, seconds=3):
+        self.message = _safe_text(text)
+        self.message_until = time.time() + seconds
+    def clear_message_if_expired(self):
+        if self.message and time.time() > self.message_until:
+            self.message = ""
+    def safe_addstr(self, y, x, text, attr=0, width=None):
+        try:
+            max_y, max_x = self.screen.getmaxyx()
+            if y < 0 or y >= max_y or x >= max_x:
+                return
+            if x < 0:
+                text = _safe_text(text)[-x:]
+                x = 0
+            if width is None:
+                width = max_x - x
+            width = max(0, min(width, max_x - x))
+            if width <= 0:
+                return
+            self.screen.addstr(y, x, _shorten_right(text, width), attr)
+        except curses.error:
+            pass
+    def fill_line(self, y, attr=0):
+        try:
+            max_y, max_x = self.screen.getmaxyx()
+            if y >= 0 and y < max_y:
+                self.screen.addstr(y, 0, " " * max_x, attr)
+        except curses.error:
+            pass
+class FilePanel:
+    def __init__(self, dir, id):
+        self.id = id
+        self.dir = _abspath(dir)
+        self.entries = []
+        self.filtered_entries = []
+        self.selected = 0
+        self.top = 0
+        self.sort_key = "name"
+        self.sort_reverse = False
+        self.filter_pattern = ""
+        self.error = ""
+        self.load_dir()
+    def load_dir(self):
+        old_name = None
+        if self.filtered_entries and self.selected < len(self.filtered_entries):
+            old_name = self.filtered_entries[self.selected].get("name")
+        self.entries = []
+        self.error = ""
+        try:
+            names = os.listdir(self.dir)
+        except OSError as exc:
+            self.error = str(exc)
+            parent = os.path.dirname(self.dir)
+            if parent and parent != self.dir:
+                self.dir = parent
+                try:
+                    names = os.listdir(self.dir)
+                    self.error = ""
+                except OSError as exc2:
+                    names = []
+                    self.error = str(exc2)
+            else:
+                names = []
+        for name in names:
+            if name in (".", ".."):
+                continue
+            path = os.path.join(self.dir, name)
+            st = _safe_stat(path)
+            is_dir = _is_dir_entry(path, st)
+            is_link, size, mtime, mode = False, 0, 0, 0
+            if st is not None:
+                is_link = stat.S_ISLNK(st.st_mode)
+                mode = st.st_mode
+                size = st.st_size
+                mtime = st.st_mtime
+            root, ext = _split_name_ext(name)
+            entry = {"name": name, "path": path, "root": root.lower(),
+                     "ext": ext.lower(), "size": size, "mtime": mtime,
+                     "mode": mode, "is_dir": is_dir, "is_link": is_link}
+            self.entries.append(entry)
+        self.apply_filter_and_sort()
+        self.selected = 0
+        if old_name:
+            for i, entry in enumerate(self.filtered_entries):
+                if entry.get("name") == old_name:
+                    self.selected = i
+                    break
+        self._clamp_selection()
+    def apply_filter_and_sort(self):
+        if self.filter_pattern:
+            pat = self.filter_pattern
+            filtered = []
+            for entry in self.entries:
+                name = entry.get("name", "")
+                if fnmatch.fnmatchcase(name.lower(), pat.lower()):
+                    filtered.append(entry)
+            self.filtered_entries = filtered
+        else:
+            self.filtered_entries = list(self.entries)
+        self.sort_entries()
+    def sort_entries(self):
+        key = self.sort_key
+        def sort_value(entry):
+            dir_weight = 0 if entry.get("is_dir") else 1
+            name = entry.get("name", "").lower()
+            if key == "ext":
+                value = (entry.get("ext", ""), name)
+            elif key == "size":
+                value = (entry.get("size", 0), name)
+            elif key == "date":
+                value = (entry.get("mtime", 0), name)
+            else:
+                value = name
+            return (dir_weight, value)
+        self.filtered_entries.sort(key=sort_value, reverse=self.sort_reverse)
+        if self.sort_reverse:
+            dirs = [e for e in self.filtered_entries if e.get("is_dir")]
+            files = [e for e in self.filtered_entries if not e.get("is_dir")]
+            self.filtered_entries = dirs + files
+    def navigate(self, dir, count):
+        if count == 0:
+            return
+        if dir < 0:
+            self.selected -= count
+        else:
+            self.selected += count
+        self._clamp_selection()
+    def _clamp_selection(self):
+        length = len(self.filtered_entries)
+        if length <= 0:
+            self.selected = self.top = 0
+            return
+        if self.selected < 0:
+            self.selected = 0
+        if self.selected >= length:
+            self.selected = length - 1
+        if self.top < 0:
+            self.top = 0
+        if self.top > self.selected:
+            self.top = self.selected
+    def ensure_visible(self, height):
+        if height <= 0:
+            self.top = 0
+            return
+        if self.selected < self.top:
+            self.top = self.selected
+        if self.selected >= self.top + height:
+            self.top = self.selected - height + 1
+        if self.top < 0:
+            self.top = 0
+    def enter_directory(self):
+        entry = self.get_selected_entry()
+        if not entry:
+            return False
+        if entry.get("is_dir"):
+            path = entry.get("path")
+            try:
+                self.dir = _abspath(path)
+                self.selected = 0
+                self.top = 0
+                self.load_dir()
+                return True
+            except Exception as exc:
+                self.error = str(exc)
+        return False
+    def go_up(self):
+        parent = os.path.dirname(self.dir)
+        if not parent or parent == self.dir:
+            return False
+        old_base = os.path.basename(self.dir)
+        self.dir = parent
+        self.load_dir()
+        for i, entry in enumerate(self.filtered_entries):
+            if entry.get("name") == old_base:
+                self.selected = i
+                break
+        self._clamp_selection()
+        return True
+    def get_selected_entry(self):
+        if self.selected < 0 or self.selected >= len(self.filtered_entries):
+            return None
+        return self.filtered_entries[self.selected]
+    def get_selected_path(self):
+        entry = self.get_selected_entry()
+        if not entry:
+            return None
+        return entry.get("path")
+    def sort_by(self, key):
+        if key not in SORT_KEYS:
+            key = "name"
+        self.sort_key = key
+        self.apply_filter_and_sort()
+        self._clamp_selection()
+    def toggle_sort(self):
+        try:
+            idx = SORT_KEYS.index(self.sort_key)
+        except ValueError:
+            idx = 0
+        idx += 1
+        if idx >= len(SORT_KEYS):
+            idx = 0
+            self.sort_reverse = not self.sort_reverse
+        self.sort_key = SORT_KEYS[idx]
+        self.apply_filter_and_sort()
+        self._clamp_selection()
+    def set_filter(self, p):
+        self.filter_pattern = _safe_text(p).strip()
+        if self.filter_pattern and not any(ch in self.filter_pattern for ch in "*?[]"):
+            self.filter_pattern = "*" + self.filter_pattern + "*"
+        self.apply_filter_and_sort()
+        self.selected = self.top = 0
+        self._clamp_selection()
+    def clear_filter(self):
+        self.filter_pattern = ""
+        self.apply_filter_and_sort()
+        self.selected = self.top = 0
+        self._clamp_selection()
+class FileViewer:
+    def __init__(self, path):
+        self.path = _abspath(path)
+        self.lines = []
+        self.offset_y = 0
+        self.offset_x = 0
+        self.screen = None
+        self.running = True
+        self.message = ""
+        self.load()
+    def load(self):
+        self.lines = []
+        try:
+            with open(self.path, "rb") as f:
+                data = f.read(8 * 1024 * 1024)
+            if b"\x00" in data[:4096]:
+                self.lines = self._hex_dump(data)
+                self.message = "Binary view: first 8 MiB"
+                return
+            text = data.decode(_terminal_encoding(), "replace")
+            self.lines = text.splitlines()
+            if text.endswith("\n"):
+                self.lines.append("")
+            if not self.lines:
+                self.lines = [""]
+            if len(data) >= 8 * 1024 * 1024:
+                self.message = "Text view: first 8 MiB"
+        except Exception as exc:
+            self.lines = ["Unable to open file:", str(exc)]
+            self.message = "Error"
+    def _hex_dump(self, data):
+        lines = []
+        width = 16
+        for i in range(0, len(data), width):
+            chunk = data[i:i + width]
+            hx = " ".join("%02x" % c for c in chunk)
+            asc = "".join(chr(c) if c >= 32 and c <= 126 else "." for c in chunk)
+            lines.append("%08x  %-47s  %s" % (i, hx, asc))
+        if not lines:
+            lines = [""]
+        return lines
+    def run(self):
+        if self.screen is None:
+            curses.wrapper(self._standalone_run)
+            return
+        self.running = True
+        curses.curs_set(0)
+        self.screen.keypad(True)
+        while self.running:
+            self.draw()
+            key = self.screen.getch()
+            self.handle_input(key)
+    def _standalone_run(self, screen):
+        self.screen = screen
+        self.run()
+    def draw(self):
+        if self.screen is None:
+            return
+        h, w = self.screen.getmaxyx()
+        try:
+            self.screen.erase()
+        except curses.error:
+            pass
+        attr = curses.color_pair(COLOR_VIEWER)
+        title = " View: %s " % self.path
+        try:
+            self.screen.addstr(0, 0, " " * w, attr | curses.A_BOLD)
+            self.screen.addstr(0, 0, _shorten_right(title, w), attr | curses.A_BOLD)
+        except curses.error:
+            pass
+        body_h = max(0, h - 2)
+        max_line = len(self.lines) - 1
+        if self.offset_y > max_line:
+            self.offset_y = max_line
+        if self.offset_y < 0:
+            self.offset_y = 0
+        for row in range(body_h):
+            idx = self.offset_y + row
+            if idx >= len(self.lines):
+                break
+            text = self.lines[idx]
+            if self.offset_x < len(text):
+                text = text[self.offset_x:]
+            else:
+                text = ""
+            try:
+                self.screen.addstr(row + 1, 0, _shorten_right(text, w), attr)
+            except curses.error:
+                pass
+        footer = "Arrows/PgUp/PgDown/Home/End scroll  F10/q/Esc close"
+        if self.message:
+            footer = self.message + " | " + footer
+        try:
+            self.screen.addstr(h - 1, 0, " " * w, curses.color_pair(COLOR_STATUS))
+            self.screen.addstr(h - 1, 0, _shorten_right(footer, w), curses.color_pair(COLOR_STATUS))
+        except curses.error:
+            pass
+        try:
+            self.screen.refresh()
+        except curses.error:
+            pass
+    def handle_input(self, key):
+        h, w = self.screen.getmaxyx()
+        page = max(1, h - 3)
+        if key in (ord("q"), ord("Q"), 27, curses.KEY_F10):
+            self.running = False
+        elif key == curses.KEY_UP:
+            self.offset_y -= 1
+        elif key == curses.KEY_DOWN:
+            self.offset_y += 1
+        elif key == curses.KEY_PPAGE:
+            self.offset_y -= page
+        elif key == curses.KEY_NPAGE:
+            self.offset_y += page
+        elif key == curses.KEY_HOME:
+            self.offset_y = 0
+            self.offset_x = 0
+        elif key == curses.KEY_END:
+            self.offset_y = max(0, len(self.lines) - page)
+        elif key == curses.KEY_LEFT:
+            self.offset_x -= 4
+        elif key == curses.KEY_RIGHT:
+            self.offset_x += 4
+        elif key == ord("0"):
+            self.offset_x = 0
+        self.offset_y = max(0, min(self.offset_y, max(0, len(self.lines) - 1)))
+        self.offset_x = max(0, self.offset_x)
+class WslCommander(App):
+    def __init__(self, screen):
+        App.__init__(self, screen)
+        self.left = FilePanel(os.getcwd(), "L")
+        self.right = FilePanel(os.path.expanduser("~"), "R")
+        if not os.path.isdir(self.right.dir):
+            self.right = FilePanel(os.getcwd(), "R")
+        self.active = self.left
+        self.inactive = self.right
+        self.setup_curses()
+    def setup_curses(self):
+        curses.curs_set(0)
+        self.screen.keypad(True)
+        try:
+            curses.use_default_colors()
+        except curses.error:
+            pass
+        pairs = ((COLOR_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN),
+                 (COLOR_ACTIVE_PANEL, curses.COLOR_WHITE, curses.COLOR_BLUE),
+                 (COLOR_INACTIVE_PANEL, curses.COLOR_WHITE, -1),
+                 (COLOR_SELECTED, curses.COLOR_BLACK, curses.COLOR_YELLOW),
+                 (COLOR_DIRECTORY, curses.COLOR_CYAN, -1),
+                 (COLOR_FILE, curses.COLOR_WHITE, -1),
+                 (COLOR_STATUS, curses.COLOR_BLACK, curses.COLOR_GREEN),
+                 (COLOR_DIALOG, curses.COLOR_WHITE, curses.COLOR_BLUE),
+                 (COLOR_VIEWER, curses.COLOR_WHITE, -1),
+                 (COLOR_SEPARATOR, curses.COLOR_YELLOW, -1))
+        for n, fg, bg in pairs:
+            curses.init_pair(n, fg, bg)
+    def run(self):
+        self.running = True
+        while self.running:
+            self.clear_message_if_expired()
+            self.draw()
+            try:
+                key = self.screen.getch()
+            except KeyboardInterrupt:
+                break
+            self.handle_input(key)
+    def handle_input(self, key):
+        panel = self.active
+        h, w = self.screen.getmaxyx()
+        list_h = max(1, h - 4)
+        if key == curses.KEY_UP:
+            panel.navigate(-1, 1)
+        elif key == curses.KEY_DOWN:
+            panel.navigate(1, 1)
+        elif key == curses.KEY_PPAGE:
+            panel.navigate(-1, list_h)
+        elif key == curses.KEY_NPAGE:
+            panel.navigate(1, list_h)
+        elif key == curses.KEY_HOME:
+            panel.selected = 0
+            panel._clamp_selection()
+        elif key == curses.KEY_END:
+            panel.selected = len(panel.filtered_entries) - 1
+            panel._clamp_selection()
+        elif key == 9:
+            self.switch_panel()
+        elif key in (10, 13, curses.KEY_ENTER):
+            before = panel.dir
+            if not panel.enter_directory():
+                path = panel.get_selected_path()
+                if path and os.path.isfile(path):
+                    self.show_viewer()
+            if panel.error:
+                self.set_message(panel.error)
+            if before != panel.dir:
+                self.set_message(panel.dir, 1)
+        elif key in (curses.KEY_BACKSPACE, 127, 8, 27):
+            panel.go_up()
+        elif key == curses.KEY_F2:
+            panel.toggle_sort()
+            direction = "desc" if panel.sort_reverse else "asc"
+            self.set_message("Sort: %s %s" % (panel.sort_key, direction), 2)
+        elif key in (curses.KEY_F3, curses.KEY_F5, curses.KEY_F6, curses.KEY_F7, curses.KEY_F8):
+            {curses.KEY_F3: self.show_viewer, curses.KEY_F5: self.copy_proc,
+             curses.KEY_F6: self.move_proc, curses.KEY_F7: self.mkdir_proc,
+             curses.KEY_F8: self.delete_proc}[key]()
+        elif key in (curses.KEY_F10, ord("q"), ord("Q")):
+            self.running = False
+        elif key == 19:
+            self.filter_proc()
+        elif key == 18:
+            self.refresh_panels()
+            self.set_message("Refreshed", 1)
+        elif key in (ord("r"), ord("R")):
+            self.rename_proc()
+        panel.ensure_visible(list_h)
+    def switch_panel(self):
+        if self.active is self.left:
+            self.active, self.inactive = self.right, self.left
+        else:
+            self.active, self.inactive = self.left, self.right
+    def refresh_panels(self):
+        self.left.load_dir()
+        self.right.load_dir()
+    def draw(self):
+        try:
+            self.screen.erase()
+        except curses.error:
+            pass
+        self.draw_header()
+        self.draw_panels()
+        self.draw_status_bar()
+        try:
+            self.screen.refresh()
+        except curses.error:
+            pass
+    def draw_header(self):
+        h, w = self.screen.getmaxyx()
+        left_path = _shorten_left(self.left.dir, max(8, (w - 24) // 2))
+        right_path = _shorten_left(self.right.dir, max(8, (w - 24) // 2))
+        text = "%s [L] %s [R] %s" % (APP_TITLE, left_path, right_path)
+        attr = curses.color_pair(COLOR_HEADER) | curses.A_BOLD
+        self.fill_line(0, attr)
+        self.safe_addstr(0, 0, text, attr, w)
+    def draw_panels(self):
+        h, w = self.screen.getmaxyx()
+        top, bottom = 1, h - 2
+        panel_h = max(0, bottom - top)
+        sep_x = w // 2
+        left_w, right_x = sep_x, sep_x + 1
+        right_w = max(0, w - right_x)
+        if panel_h <= 0:
+            return
+        for y in range(top, bottom):
+            self.safe_addstr(y, sep_x, "|", curses.color_pair(COLOR_SEPARATOR), 1)
+        self.draw_panel(self.left, top, 0, left_w, panel_h, self.active is self.left)
+        self.draw_panel(self.right, top, right_x, right_w, panel_h, self.active is self.right)
+    def draw_panel(self, panel, y, x, width, height, active):
+        if width <= 0 or height <= 0:
+            return
+        base_attr = curses.color_pair(COLOR_ACTIVE_PANEL if active else COLOR_INACTIVE_PANEL)
+        header_attr = base_attr | curses.A_BOLD
+        self._draw_panel_header(panel, y, x, width, header_attr)
+        list_h = max(0, height - 1)
+        panel.ensure_visible(list_h)
+        for row in range(list_h):
+            screen_y = y + 1 + row
+            idx = panel.top + row
+            if idx < len(panel.filtered_entries):
+                entry = panel.filtered_entries[idx]
+                selected = active and idx == panel.selected
+                self._draw_entry(screen_y, x, width, entry, selected, base_attr)
+            else:
+                self.safe_addstr(screen_y, x, " " * width, base_attr, width)
+        if panel.error and list_h > 0:
+            self.safe_addstr(y + height - 1, x, _shorten_right(panel.error, width), base_attr | curses.A_BOLD, width)
+    def _draw_panel_header(self, panel, y, x, width, attr):
+        sort_mark = panel.sort_key
+        if panel.sort_reverse:
+            sort_mark += "-"
+        if panel.filter_pattern:
+            sort_mark += " *"
+        line = self._format_columns("Name", "Size", "Date", "Perm", width)
+        if width >= 18:
+            tail = "[" + sort_mark + "]"
+            if len(tail) + 1 < width:
+                line = line[:max(0, width - len(tail))] + tail
+        self.safe_addstr(y, x, line, attr, width)
+    def _draw_entry(self, y, x, width, entry, selected, base_attr):
+        if selected:
+            attr = curses.color_pair(COLOR_SELECTED)
+        elif entry.get("is_dir"):
+            attr = curses.color_pair(COLOR_DIRECTORY) | curses.A_BOLD
+        else:
+            attr = curses.color_pair(COLOR_FILE)
+        if not selected and base_attr:
+            if entry.get("is_dir"):
+                attr = curses.color_pair(COLOR_DIRECTORY) | curses.A_BOLD
+            else:
+                attr = base_attr
+        name = entry.get("name", "")
+        if entry.get("is_dir"):
+            name = "[" + name + "]"
+        if entry.get("is_link"):
+            name = name + "@"
+        size = "<DIR>" if entry.get("is_dir") else format_size(entry.get("size", 0))
+        date = format_date(entry.get("mtime", 0))
+        perm = format_permissions(entry.get("mode", 0))
+        line = self._format_columns(name, size, date, perm, width)
+        self.safe_addstr(y, x, line, attr, width)
+    def _format_columns(self, name, size, date, perm, width):
+        if width <= 0:
+            return ""
+        if width < 24:
+            return _shorten_right(name, width).ljust(width)
+        perm_w, date_w, size_w, spaces = 10, 11, 8, 3
+        name_w = width - perm_w - date_w - size_w - spaces
+        if name_w < 8:
+            perm_w, date_w, size_w, spaces = 0, 10, 7, 2
+            name_w = width - date_w - size_w - spaces
+        if perm_w <= 0:
+            line = "%-*s %*s %-*s" % (name_w, _shorten_right(name, name_w),
+                                      size_w, _shorten_left(size, size_w),
+                                      date_w, _shorten_right(date, date_w))
+        else:
+            line = "%-*s %*s %-*s %-*s" % (name_w, _shorten_right(name, name_w),
+                                           size_w, _shorten_left(size, size_w),
+                                           date_w, _shorten_right(date, date_w),
+                                           perm_w, _shorten_right(perm, perm_w))
+        return _shorten_right(line, width).ljust(width)
+    def draw_status_bar(self):
+        h, w = self.screen.getmaxyx()
+        text = "F3 View F5 Copy F6 Move F7 MkDir F8 Delete F10 Quit"
+        if self.message:
+            text = self.message
+        attr = curses.color_pair(COLOR_STATUS) | curses.A_BOLD
+        self.fill_line(h - 1, attr)
+        self.safe_addstr(h - 1, 0, text, attr, w)
+    def draw_dialog(self, title, msg, buf="", confirm=False):
+        h, w = self.screen.getmaxyx()
+        box_w = max(30, min(w - 4, max(len(title), len(msg), len(buf)) + 6))
+        box_h = 7 if not confirm else 5
+        if box_w > w:
+            box_w = w
+        if box_h > h:
+            box_h = h
+        y = max(0, (h - box_h) // 2)
+        x = max(0, (w - box_w) // 2)
+        attr = curses.color_pair(COLOR_DIALOG)
+        for row in range(box_h):
+            self.safe_addstr(y + row, x, " " * box_w, attr, box_w)
+        if box_w >= 2 and box_h >= 2:
+            self.safe_addstr(y, x, "+" + "-" * (box_w - 2) + "+", attr | curses.A_BOLD, box_w)
+            for row in range(1, box_h - 1):
+                self.safe_addstr(y + row, x, "|", attr | curses.A_BOLD, 1)
+                self.safe_addstr(y + row, x + box_w - 1, "|", attr | curses.A_BOLD, 1)
+            self.safe_addstr(y + box_h - 1, x, "+" + "-" * (box_w - 2) + "+", attr | curses.A_BOLD, box_w)
+        title_text = " " + title + " "
+        self.safe_addstr(y, x + max(1, (box_w - len(title_text)) // 2), title_text, attr | curses.A_BOLD, len(title_text))
+        self.safe_addstr(y + 2, x + 2, _shorten_right(msg, box_w - 4), attr, box_w - 4)
+        if confirm:
+            prompt = "(y/N)"
+            self.safe_addstr(y + 3, x + 2, prompt, attr | curses.A_BOLD, box_w - 4)
+        else:
+            input_w = box_w - 4
+            visible = _shorten_left(buf, input_w)
+            self.safe_addstr(y + 4, x + 2, " " * input_w, curses.color_pair(COLOR_SELECTED), input_w)
+            self.safe_addstr(y + 4, x + 2, visible, curses.color_pair(COLOR_SELECTED), input_w)
+            try:
+                curses.curs_set(1)
+                cursor_x = x + 2 + min(len(visible), input_w - 1)
+                self.screen.move(y + 4, cursor_x)
+            except curses.error:
+                pass
+        try:
+            self.screen.refresh()
+        except curses.error:
+            pass
+    def _confirm_dialog(self, title, msg):
+        curses.curs_set(0)
+        while True:
+            self.draw()
+            self.draw_dialog(title, msg, "", True)
+            key = self.screen.getch()
+            if key in (ord("y"), ord("Y")):
+                return True
+            if key in (ord("n"), ord("N"), 27, 10, 13):
+                return False
+    def _input_dialog(self, title, msg, initial=""):
+        buf = _safe_text(initial)
+        while True:
+            self.draw()
+            self.draw_dialog(title, msg, buf, False)
+            key = self.screen.getch()
+            if key in (10, 13, curses.KEY_ENTER):
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+                return buf
+            if key == 27:
+                try:
+                    curses.curs_set(0)
+                except curses.error:
+                    pass
+                return None
+            if key in (curses.KEY_BACKSPACE, 127, 8):
+                buf = buf[:-1]
+            elif key == curses.KEY_DC:
+                buf = ""
+            elif key >= 32 and key < 127:
+                buf += chr(key)
+    def show_viewer(self):
+        path = self.active.get_selected_path()
+        if not path:
+            self.set_message("No file selected")
+            return
+        if os.path.isdir(path):
+            self.set_message("Selected item is a directory")
+            return
+        viewer = FileViewer(path)
+        viewer.screen = self.screen
+        viewer.run()
+        self.setup_curses()
+    def _progress_cb(self, src, dst, done, total):
+        if total:
+            pct = int((float(done) / float(total)) * 100.0)
+            text = "%s %s%%" % (_basename(src), pct)
+        else:
+            text = _basename(src)
+        self.message = text
+        self.draw()
+    def copy_proc(self):
+        src = self.active.get_selected_path()
+        if not src:
+            self.set_message("No item selected")
+            return
+        default_dst = os.path.join(self.inactive.dir, os.path.basename(src))
+        dst = self._input_dialog("Copy", "Copy to:", default_dst)
+        if not dst:
+            self.set_message("Copy cancelled", 1)
+            return
+        try:
+            if os.path.exists(dst):
+                ok = self._confirm_dialog("Overwrite", "Overwrite %s? (y/N)" % _basename(dst))
+                if not ok:
+                    self.set_message("Copy cancelled", 1)
+                    return
+            self.message = "Copying..."
+            copy_file(src, dst, self._progress_cb)
+            self.refresh_panels()
+            self.set_message("Copied to %s" % dst)
+        except Exception as exc:
+            self.refresh_panels()
+            self.set_message("Copy failed: %s" % exc, 5)
+    def move_proc(self):
+        src = self.active.get_selected_path()
+        if not src:
+            self.set_message("No item selected")
+            return
+        default_dst = os.path.join(self.inactive.dir, os.path.basename(src))
+        dst = self._input_dialog("Move", "Move/rename to:", default_dst)
+        if not dst:
+            self.set_message("Move cancelled", 1)
+            return
+        try:
+            if os.path.exists(dst):
+                ok = self._confirm_dialog("Overwrite", "Overwrite %s? (y/N)" % _basename(dst))
+                if not ok:
+                    self.set_message("Move cancelled", 1)
+                    return
+            self.message = "Moving..."
+            move_file(src, dst, self._progress_cb)
+            self.refresh_panels()
+            self.set_message("Moved to %s" % dst)
+        except Exception as exc:
+            self.refresh_panels()
+            self.set_message("Move failed: %s" % exc, 5)
+    def delete_proc(self):
+        path = self.active.get_selected_path()
+        if not path:
+            self.set_message("No item selected")
+            return
+        ok = self._confirm_dialog("Delete", "Delete %s? (y/N)" % _basename(path))
+        if not ok:
+            self.set_message("Delete cancelled", 1)
+            return
+        try:
+            delete_file(path)
+            self.refresh_panels()
+            self.set_message("Deleted %s" % _basename(path))
+        except Exception as exc:
+            self.refresh_panels()
+            self.set_message("Delete failed: %s" % exc, 5)
+    def mkdir_proc(self):
+        name = self._input_dialog("MkDir", "Create directory:", "")
+        if not name:
+            self.set_message("MkDir cancelled", 1)
+            return
+        path = name
+        if not os.path.isabs(path):
+            path = os.path.join(self.active.dir, path)
+        try:
+            create_directory(path)
+            self.refresh_panels()
+            self.set_message("Created %s" % path)
+        except Exception as exc:
+            self.refresh_panels()
+            self.set_message("MkDir failed: %s" % exc, 5)
+    def rename_proc(self):
+        src = self.active.get_selected_path()
+        if not src:
+            self.set_message("No item selected")
+            return
+        initial = os.path.basename(src)
+        new_name = self._input_dialog("Rename", "Rename to:", initial)
+        if not new_name or new_name == initial:
+            self.set_message("Rename cancelled", 1)
+            return
+        try:
+            new_path = rename_file(src, new_name)
+            self.refresh_panels()
+            self.set_message("Renamed to %s" % new_path)
+        except Exception as exc:
+            self.refresh_panels()
+            self.set_message("Rename failed: %s" % exc, 5)
+    def filter_proc(self):
+        initial = self.active.filter_pattern
+        text = self._input_dialog("Filter", "Pattern (empty clears):", initial)
+        if text is None:
+            self.set_message("Filter cancelled", 1)
+            return
+        if text.strip():
+            self.active.set_filter(text)
+            self.set_message("Filter: %s" % self.active.filter_pattern, 2)
+        else:
+            self.active.clear_filter()
+            self.set_message("Filter cleared", 2)
+def _main(screen):
+    app = WslCommander(screen)
+    app.run()
+def main():
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
+    if len(sys.argv) > 1:
+        start = _abspath(sys.argv[1])
+        if os.path.isdir(start):
+            os.chdir(start)
+    curses.wrapper(_main)
+if __name__ == "__main__":
+    main()

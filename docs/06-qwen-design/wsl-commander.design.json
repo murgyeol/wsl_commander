@@ -1,0 +1,645 @@
+{
+  "schema_version": "1.0",
+  "project": {
+    "name": "wsl-commander",
+    "type": "cli",
+    "language": "python",
+    "python_version": "3.8",
+    "workdir": "/home/won/wsl-commander"
+  },
+  "plan": {
+    "problem_statement": "WSL (Linux) users lack a native dual-pane file manager similar to Total Commander on Windows. Existing options like Double Commander have complex setups or heavy dependencies. A lightweight, keyboard-driven TUI file manager built specifically for the terminal would improve file management productivity on WSL.",
+    "goals": [
+      "Dual-pane file browser showing directory contents in two side-by-side panels",
+      "Keyboard-driven navigation (arrow keys, Tab, F-key shortcuts)",
+      "Common file operations: copy, move, rename, delete, mkdir, view",
+      "File filtering and sorting (by name, size, date, type)",
+      "Directory tree navigation (up/down, enter directory, go back)",
+      "Command-line quick start: `lcom` launches the program",
+      "Built using Python with cross-platform terminal support"
+    ],
+    "non_goals": [
+      "No GUI — pure terminal interface (TUI)",
+      "No remote file system support (FTP, SFTP, cloud) in v1",
+      "No file editing — view only in v1",
+      "No plugin system in v1",
+      "No archive/compression handling in v1"
+    ],
+    "scope": "Single Python script `lcom` that runs as a TUI application. Dual-pane file listing with current directory at top. Navigation: Up/Down/PageUp/PageDown/Home/End. Tab to switch active pane. File operations via F-keys (F3=view, F5=copy, F6=move/rename, F7=mkdir, F8=delete). Directory tree: Enter to descend, Backspace/Esc to go up. Drive/root selection. File sorting by name, extension, size, date. File filtering by wildcard pattern. Status bar with key hints. Minimal dependencies (only `curses`/standard library).",
+    "constraints": [
+      "Must work in stock WSL terminal (Windows Terminal, tmux, etc.)",
+      "Python 3.8+ compatible (standard library only, no external pip packages)",
+      "Must handle UTF-8 filenames (Korean filenames)",
+      "Must not create temporary files or require root",
+      "Single executable script (`lcom` in PATH or run via `python3 lcom`)",
+      "Use Python's built-in `curses` library for TUI",
+      "Executable name: `lcom`"
+    ],
+    "success_criteria": [
+      "`python3 lcom` launches the TUI with two file panels",
+      "Arrow keys navigate files in both panels",
+      "Tab switches active pane",
+      "Enter descends into directories, Backspace goes up",
+      "F5 copies file, F6 moves/renames, F8 deletes with confirmation",
+      "F7 creates directory",
+      "File sizes, dates, permissions displayed correctly",
+      "UTF-8 filenames display correctly",
+      "F10 or q quits the program",
+      "Sorting by name/size/date works"
+    ]
+  },
+  "architecture": {
+    "module_structure": {
+      "lcom": {
+        "purpose": "Single-file executable containing all application code: WslCommander class, FilePanel class, FileViewer class, file operation functions, utility functions, and constants."
+      }
+    },
+    "data_flow": [
+      "User keystroke → stdscr.getch() → WslCommander.handle_input(key) → KEYBINDINGS lookup → dispatch to handler method",
+      "Navigation keys → active_panel.navigate(direction) → FilePanel state update (cursor_index, scroll_offset)",
+      "Tab → toggle WslCommander.active_panel_index between 0 (left) and 1 (right)",
+      "Enter directory → active_panel.enter_directory() → FilePanel.load_dir() (re-read os.listdir+os.stat, apply sort+filter)",
+      "F5 (Copy) → WslCommander.copy_proc() → copy_file(active.get_selected_path(), inactive.current_dir) → refresh both panels",
+      "F6 (Move) → WslCommander.move_proc() → move_file(active.get_selected_path(), inactive.current_dir) → refresh both panels",
+      "F8 (Delete) → WslCommander.delete_proc() → draw_dialog(confirm) → delete_file(path) → refresh active panel",
+      "F7 (Mkdir) → WslCommander.mkdir_proc() → draw_dialog(input prompt) → create_directory(path) → refresh active panel",
+      "F3 (View) → WslCommander.show_viewer() → FileViewer.run() (modal pager loop) → return to main loop",
+      "After every handle_input() call → WslCommander.draw() → draw_header() + draw_panels() + draw_status_bar() → stdscr.refresh()",
+      "Input → State → Render is a strict unidirectional cycle; input handlers never call draw directly"
+    ],
+    "file_structure": [
+      {
+        "path": "lcom",
+        "purpose": "Main executable script (~700–1000 lines). Single-file Python TUI application implementing a dual-pane file manager using curses. Contains all classes, functions, and constants. Shebang: #!/usr/bin/env python3.",
+        "exports": ["main()", "WslCommander", "FilePanel", "FileViewer", "copy_file", "move_file", "delete_file", "create_directory", "rename_file", "format_size", "format_date", "format_permissions"],
+        "classes": [
+          {
+            "name": "WslCommander",
+            "description": "Main application controller for Wsl Commander. Owns curses setup/teardown, main event loop, input dispatch, panel coordination, modal state management, and top-level UI rendering. Maintains active_panel_index (0=left, 1=right), running flag, and mode enum (NORMAL, INPUT, CONFIRM, VIEW).",
+            "methods": [
+              {
+                "name": "__init__",
+                "signature": "def __init__(self, stdscr: \"curses.window\") -> None",
+                "description": "Initialize the Wsl Commander application. Sets up curses color pairs via curses.init_pair() for all COLOR_PAIRS entries, configures terminal (cbreak, noecho, keypad, hide cursor), creates left and right FilePanel instances initialized to os.getcwd(), sets active_panel_index=0, mode=NORMAL, and running=True.",
+                "args": {
+                  "stdscr": "curses.window — The curses standard screen object from curses.wrapper()."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "run",
+                "signature": "def run(self) -> None",
+                "description": "The main event loop. Sets stdscr.timeout(50) for non-blocking getch(). Repeatedly: (1) reads key via stdscr.getch(), (2) if key != -1, dispatches via handle_input(key) which returns False on quit, (3) calls draw() to render the full TUI. Loops until running is False or handle_input returns False. On exit, restores terminal state (curses.endwin() is handled by curses.wrapper()).",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "handle_input",
+                "signature": "def handle_input(self, key: int) -> bool",
+                "description": "Central keystroke dispatcher. Checks mode first: if mode is CONFIRM, INPUT, or VIEW, delegates to modal handler. In NORMAL mode, looks up key in KEYBINDINGS dict and dispatches to the corresponding handler method. Unmapped keys are silently ignored. Returns False if quit action is triggered, True otherwise.",
+                "args": {
+                  "key": "int — Raw key code from stdscr.getch(). May be -1 (no input), a curses.KEY_* constant, or an ordinal of a printable character."
+                },
+                "returns": "bool — False if the application should quit, True to continue the main loop."
+              },
+              {
+                "name": "draw",
+                "signature": "def draw(self) -> None",
+                "description": "Render the entire TUI. Calls stdscr.erase(), then delegates to draw_header(), draw_panels(), and draw_status_bar() in sequence. If mode is CONFIRM, INPUT, or VIEW, also calls draw_dialog() to render the modal overlay on top. Finally calls stdscr.refresh(). Does NOT call refresh on panels (panels refresh their file list lazily only on directory change).",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "draw_header",
+                "signature": "def draw_header(self) -> None",
+                "description": "Render the header bar at the top of the terminal (rows 0 to HEADER_HEIGHT-1). Shows program name 'Wsl Commander', current directory path for each panel (truncated to fit panel width), and active pane indicator ([L] or [R]). Column labels ('Name', 'Size', 'Date', 'Perm') below the directory paths. Uses COLOR_PAIRS['header'] for styling. Checks terminal width; if too narrow, truncates or omits column labels.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "draw_panels",
+                "signature": "def draw_panels(self) -> None",
+                "description": "Render both file panels. Calculates panel widths: left panel occupies columns 0 to (cols//2)-1, right panel occupies columns (cols//2)+1 to cols-1 (or cols//2 to cols-1 if no separator column). Renders vertical separator at column cols//2 using PANEL_SEPARATOR character. For each panel, renders visible file rows using the panel's file list, applying selection highlighting (COLOR_PAIRS['selected']) for the active panel's cursor row, directory coloring (COLOR_PAIRS['directory']), and dim styling for inactive panel. Handles empty directory by showing '(empty)' placeholder. Clamps visible range when terminal is too small for HEADER_HEIGHT + STATUS_HEIGHT.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "draw_status_bar",
+                "signature": "def draw_status_bar(self) -> None",
+                "description": "Render the status bar at the bottom of the terminal (last STATUS_HEIGHT rows). In NORMAL mode, shows key hints: 'F3 View  F5 Copy  F6 Move  F7 MkDir  F8 Delete  F10 Quit'. Also shows active panel file count, total size, current filter if active, current sort key indicator, and any transient status message (e.g., error feedback from file operations). In modal modes, shows context-appropriate prompts. If terminal height < HEADER_HEIGHT + 2 + STATUS_HEIGHT, status bar is omitted to avoid crash.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "draw_dialog",
+                "signature": "def draw_dialog(self, title: str, message: str, input_buffer: str = \"\", is_confirm: bool = False) -> None",
+                "description": "Render a modal dialog overlay centered on the terminal. Draws a bordered box with title and message. For INPUT mode (mkdir/rename/filter), shows the input_buffer text with cursor. For CONFIRM mode, shows 'Delete <filename>? (y/N)' prompt. Uses COLOR_PAIRS['dialog'] for styling. Dialog dimensions adapt to terminal size; minimum 40x5 box. Backdrop panels remain visible behind the dialog.",
+                "args": {
+                  "title": "str — Dialog title (e.g., 'Delete', 'Create Directory', 'Rename', 'Filter').",
+                  "message": "str — Body text (e.g., file name, prompt instructions).",
+                  "input_buffer": "str — Current text input for INPUT mode dialogs. Default empty string.",
+                  "is_confirm": "bool — True for yes/no confirmation dialogs (CONFIRM mode), False for text-input dialogs (INPUT mode)."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "show_viewer",
+                "signature": "def show_viewer(self) -> None",
+                "description": "Open the file under cursor in the active panel in a full-screen scrollable pager. Creates a FileViewer instance with the selected file path, sets mode=VIEW, and runs the viewer's modal event loop. On viewer exit, sets mode back to NORMAL and refreshes both panels. Displays error in status bar if file is binary, too large (>VIEWER_MAX_SIZE), or unreadable.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "copy_proc",
+                "signature": "def copy_proc(self) -> None",
+                "description": "Copy the selected file(s) from the active panel to the inactive panel's current directory. Calls get_selected_path() on the active panel to get source. If source is a directory, uses shutil.copytree with dirs_exist_ok=False (prompts on overwrite). If source is a file, calls copy_file() with progress callback that updates status bar. On success, refreshes both panels and shows 'Copied: <filename>' in status bar. On failure, shows error message in status bar (e.g., 'Permission denied', 'Disk full'). Handles overwrite case by showing CONFIRM dialog.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "move_proc",
+                "signature": "def move_proc(self) -> None",
+                "description": "Move/rename the selected file(s) from the active panel to the inactive panel's current directory. Calls get_selected_path() on the active panel. Uses os.rename for same-filesystem moves (fast), falls back to shutil.move for cross-filesystem. Shows progress in status bar for large moves. On success, refreshes both panels and shows 'Moved: <filename>'. On failure, shows error in status bar. Handles overwrite with CONFIRM dialog. For rename flow (same source/destination directory), prompts for new name via INPUT dialog.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "delete_proc",
+                "signature": "def delete_proc(self) -> None",
+                "description": "Delete the selected file(s) with confirmation. First shows CONFIRM dialog: 'Delete <filename>? (y/N)'. On 'y'/'Y' confirmation, calls delete_file() for files or shutil.rmtree for directories. On success, refreshes active panel and shows 'Deleted: <filename>'. On failure (PermissionError, OSError), shows error in status bar and does NOT refresh (file remains listed). On 'n'/'N'/Esc/Enter-default, cancels without action. If no file is selected (empty directory), shows 'No file selected' in status bar.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "mkdir_proc",
+                "signature": "def mkdir_proc(self) -> None",
+                "description": "Prompt for a directory name and create it in the active panel's current directory. Sets mode=INPUT and shows draw_dialog with title 'Create Directory' and empty input_buffer. On Enter submit, calls create_directory() with the full path. Validates that the name is non-empty and valid (no '/' characters). On success, refreshes active panel and shows 'Created: <dirname>'. On failure (permission denied, already exists, invalid name), shows error in status bar. On Esc, cancels without action.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "rename_proc",
+                "signature": "def rename_proc(self) -> None",
+                "description": "Prompt for a new name and rename the selected file. Sets mode=INPUT and shows draw_dialog with title 'Rename' and input_buffer pre-filled with the current filename. On Enter submit, calls rename_file() with old and new paths. Validates that new name differs from old and contains no path separators. On success, refreshes active panel and shows 'Renamed: <old> → <new>'. On failure (permission denied, target exists, invalid name), shows error in status bar. On Esc, cancels without action. If no file selected, shows 'No file selected'.",
+                "args": {},
+                "returns": "None"
+              }
+            ]
+          },
+          {
+            "name": "FilePanel",
+            "description": "Manages the state and file listing for a single pane. Owns current_dir, file list cache, cursor index, scroll offset, sort configuration, and filter pattern. Provides navigation, directory traversal, rendering helpers, and selection accessors. One instance per pane (left and right); each maintains independent state.",
+            "methods": [
+              {
+                "name": "__init__",
+                "signature": "def __init__(self, start_dir: str, panel_id: int) -> None",
+                "description": "Initialize a FilePanel with the given starting directory. Sets current_dir=start_dir (defaults to os.getcwd()), initializes empty files list, cursor_index=0, scroll_offset=0, sort_key='name', sort_reverse=False, filter_pattern=None, show_hidden=False. Calls load_dir() to populate initial file list. Stores panel_id (0=left, 1=right) for display purposes.",
+                "args": {
+                  "start_dir": "str — Initial directory path (normally os.getcwd()).",
+                  "panel_id": "int — Panel identifier: 0 for left panel, 1 for right panel."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "load_dir",
+                "signature": "def load_dir(self) -> None",
+                "description": "Re-read the current directory contents. Calls os.listdir(current_dir), then os.stat() + os.lstat() for each entry to build file_info dicts with keys: name (str), path (str - absolute), size (int - bytes), mtime (float - Unix timestamp), mode (int - st_mode), is_dir (bool), is_symlink (bool). Applies sort_by current key, then applies filter_pattern via fnmatch if set. Preserves cursor position by matching the previously selected filename after reload; if the file no longer exists, clamps cursor_index to valid range. Handles PermissionError by showing error in status bar and leaving previous file list intact. Handles FileNotFoundError if directory was deleted externally. Skips entries that cause OSError during stat (e.g., broken symlinks, permission denied on individual files) — those entries are excluded from the list with a counter logged to a module-level warning counter.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "navigate",
+                "signature": "def navigate(self, direction: str, count: int = 1) -> None",
+                "description": "Move the cursor within the file list. Supports directions: 'up' (cursor_index -= count, clamped to 0 minimum), 'down' (cursor_index += count, clamped to len(files)-1 maximum), 'pgup' (decrement by visible_rows, with count as multiplier), 'pgdn' (increment by visible_rows), 'home' (cursor_index=0), 'end' (cursor_index=len(files)-1). After moving, calls _ensure_cursor_visible() to adjust scroll_offset. If files list is empty, no-op.",
+                "args": {
+                  "direction": "str — One of 'up', 'down', 'pgup', 'pgdn', 'home', 'end'.",
+                  "count": "int — Number of steps for 'up'/'down'. For 'pgup'/'pgdn', multiplied by visible_rows to determine scroll amount. Default 1."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "enter_directory",
+                "signature": "def enter_directory(self) -> bool",
+                "description": "Change current_dir to the directory under the cursor. Checks if the entry at cursor_index has is_dir=True. If so, sets current_dir to the directory's absolute path, resets cursor_index=0 and scroll_offset=0, calls load_dir(). If the entry is a symlink to a directory, follows the symlink (via os.path.isdir which resolves symlinks). Returns True on success. Returns False if no directory at cursor, file list is empty, or PermissionError on the target directory (error shown in status bar, current_dir unchanged).",
+                "args": {},
+                "returns": "bool — True if the directory was successfully entered, False otherwise."
+              },
+              {
+                "name": "go_up",
+                "signature": "def go_up(self) -> None",
+                "description": "Change current_dir to its parent directory. Computes parent via os.path.dirname(current_dir). If already at filesystem root ('/'), parent is '/' and this is a no-op (does not reload). Otherwise, sets current_dir to parent, resets cursor_index=0 and scroll_offset=0, calls load_dir(). Handles PermissionError on parent by showing error in status bar and keeping current_dir unchanged.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "get_selected_path",
+                "signature": "def get_selected_path(self) -> str | None",
+                "description": "Get the full absolute path of the currently highlighted file entry. Returns os.path.join(current_dir, files[cursor_index]['name']). Returns None if file list is empty (no files in directory).",
+                "args": {},
+                "returns": "str | None — Absolute path of the selected file, or None if the file list is empty."
+              },
+              {
+                "name": "sort_by",
+                "signature": "def sort_by(self, key: str) -> None",
+                "description": "Set the sort key and re-sort the file list. Valid keys: 'name', 'extension', 'size', 'date'. Directories are always grouped before files regardless of sort key (Total Commander convention). Secondary sort is always by name for stable ordering. After sorting, preserves cursor on the previously selected file; if the file no longer exists in the list (shouldn't happen as sort only reorders), clamps cursor to valid range. Calls _ensure_cursor_visible(). Unknown key values are silently ignored (no-op).",
+                "args": {
+                  "key": "str — Sort key: 'name', 'extension', 'size', or 'date'."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "toggle_sort",
+                "signature": "def toggle_sort(self) -> None",
+                "description": "Cycle the sort key to the next in sequence: name → extension → size → date → (back to name). Calls sort_by() with the new key. Also toggles sort_reverse if called via Shift+F2 (handled by caller, not this method; if reverse_sort parameter is True, flips sort_reverse and re-applies sort). The cycle order maintains directories-before-files grouping.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "set_filter",
+                "signature": "def set_filter(self, pattern: str | None) -> None",
+                "description": "Apply a wildcard filter to the file list. Uses fnmatch.fnmatch(filename, pattern) for matching. If pattern is None or empty string '', filter is cleared (all files shown, subject to show_hidden setting). Stores pattern as self.filter_pattern. Calls load_dir() to re-read and re-apply sort+filter. Filter pattern is displayed in panel header or status bar when active.",
+                "args": {
+                  "pattern": "str | None — fnmatch-compatible wildcard pattern (e.g., '*.py', 'README*', '*test*'). None or '' clears the filter."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "clear_filter",
+                "signature": "def clear_filter(self) -> None",
+                "description": "Clear the current filter pattern. Sets self.filter_pattern = None and calls load_dir() to show all files (subject to show_hidden). Equivalent to set_filter(None).",
+                "args": {},
+                "returns": "None"
+              }
+            ]
+          },
+          {
+            "name": "FileViewer",
+            "description": "Full-screen modal file viewer/pager. Reads file content into memory, renders it in a curses pad (scrollable text buffer), and provides keyboard navigation (Up/Down/PgUp/PgDn/Home/End/q/Esc to exit). Handles binary file detection, UTF-8 decoding, and large file truncation.",
+            "methods": [
+              {
+                "name": "__init__",
+                "signature": "def __init__(self, stdscr: \"curses.window\", filepath: str) -> None",
+                "description": "Initialize the file viewer for the given file path. Reads file content via a helper (read_file_preview) up to VIEWER_MAX_SIZE bytes. Attempts UTF-8 decode with errors='replace' for undecodable bytes. Detects binary files by scanning for null bytes in the first 8192 bytes. Stores content as list of lines for efficient line-based rendering. Sets scroll_position=0 and calculates total_lines. If file cannot be read (PermissionError, FileNotFoundError), stores error message for display.",
+                "args": {
+                  "stdscr": "curses.window — The curses standard screen object.",
+                  "filepath": "str — Absolute path to the file to view."
+                },
+                "returns": "None"
+              },
+              {
+                "name": "run",
+                "signature": "def run(self) -> None",
+                "description": "Run the viewer's modal event loop. Creates a curses pad large enough to hold all lines. Enters a while loop: draw(), then getch(), then handle_input(key). Loops until handle_input returns False (quit signal: q, Esc, F3 toggle, F10). On exit, clears the screen (pad is not persisted). Sets a timeout on getch to allow terminal resize handling.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "draw",
+                "signature": "def draw(self) -> None",
+                "description": "Render the viewer content to the full terminal. Clears stdscr, draws a top status line showing filename and scroll position (e.g., 'Viewing: readme.md  Line 42/200'), then renders visible lines from the pad starting at scroll_position. Uses COLOR_PAIRS['dialog'] for the border/styling. Handles terminal resize by recalculating visible rows. If file is binary, shows 'Binary file — cannot display' centered. If file exceeds VIEWER_MAX_SIZE, shows 'File too large to display (>1 MB)'.",
+                "args": {},
+                "returns": "None"
+              },
+              {
+                "name": "handle_input",
+                "signature": "def handle_input(self, key: int) -> bool",
+                "description": "Handle keyboard input within the viewer. Maps: KEY_UP/KEY_DOWN (scroll 1 line), KEY_PPAGE/KEY_NPAGE (scroll one page), KEY_HOME (scroll to top), KEY_END (scroll to bottom), 'q'/'Q'/KEY_F3/KEY_F10/27(Esc) (quit viewer, return False). Clamps scroll_position to valid range [0, max_scroll]. Returns True to continue viewing, False to exit viewer.",
+                "args": {
+                  "key": "int — Raw key code from pad.getch()."
+                },
+                "returns": "bool — False if viewer should close and return to NORMAL mode, True to continue viewing."
+              }
+            ]
+          }
+        ],
+        "functions": [
+          {
+            "name": "main",
+            "signature": "def main() -> None",
+            "description": "Entry point for the lcom application. Wraps curses.wrapper(WslCommander) — curses.wrapper handles terminal initialization (cbreak, noecho, keypad) and cleanup (restore terminal on exception or normal exit). On ImportError (curses not available), prints error to stderr and exits with code 1. On unexpected exceptions, curses.wrapper restores terminal before re-raising. Returns None (exit code is implicitly 0 unless exception escapes wrapper).",
+            "args": {},
+            "returns": "None"
+          },
+          {
+            "name": "format_size",
+            "signature": "def format_size(size_bytes: int) -> str",
+            "description": "Format a byte count into a human-readable size string. Scales: bytes (B), kilobytes (KB), megabytes (MB), gigabytes (GB). Uses binary (1024) scale. Examples: 0 → '0 B', 850 → '850 B', 4300 → '4.2 KB', 1048576 → '1.0 MB', 1500000000 → '1.4 GB'. For directories, returns '<DIR>' instead of size. Handles negative values by returning '—'.",
+            "args": {
+              "size_bytes": "int — File size in bytes. -1 or negative for directories/unknown."
+            },
+            "returns": "str — Formatted size string (e.g., '4.2 KB', '1.3 MB', '<DIR>')."
+          },
+          {
+            "name": "format_date",
+            "signature": "def format_date(mtime: float) -> str",
+            "description": "Format a file modification timestamp into a compact display string. Returns 'YYYY-MM-DD' format for dates older than 6 months, or 'MMM DD HH:MM' for recent dates. Uses local timezone via time.localtime(). Handles mtime=0 or negative by returning '—'. Example outputs: '2026-07-09', 'Jul 09 14:30'.",
+            "args": {
+              "mtime": "float — Modification time as a Unix timestamp (os.stat().st_mtime)."
+            },
+            "returns": "str — Formatted date string."
+          },
+          {
+            "name": "format_permissions",
+            "signature": "def format_permissions(mode: int) -> str",
+            "description": "Convert a file mode integer (from os.stat().st_mode) into a 10-character Unix permission string. Format: first character is file type ('-' for regular file, 'd' for directory, 'l' for symlink, 'b' for block device, 'c' for char device, 'p' for FIFO, 's' for socket). Remaining 9 characters are rwx triplets for user, group, and other. Uses stat.S_IS* macros for type detection and bitwise AND with stat.S_IRUSR/S_IWUSR/S_IXUSR etc. for permissions. Example outputs: 'drwxr-xr-x', '-rw-r--r--', 'lrwxrwxrwx'.",
+            "args": {
+              "mode": "int — File mode from os.stat().st_mode."
+            },
+            "returns": "str — 10-character permission string."
+          }
+        ],
+        "depends_on": []
+      }
+    ],
+    "key_data_structures": [
+      {
+        "name": "file_info dict",
+        "description": "Per-file entry in FilePanel.files list. Keys: name (str — filename), path (str — absolute path), size (int — bytes, -1 for directories), mtime (float — Unix timestamp), mode (int — st_mode), is_dir (bool), is_symlink (bool), ext (str — lowercase file extension without dot, '' for no extension)."
+      },
+      {
+        "name": "KEYBINDINGS",
+        "description": "Module-level constant: dict[int, str]. Maps raw curses key codes (int) to semantic action name strings. Consumed by WslCommander.handle_input() for dispatching. See constants section below for full mapping."
+      },
+      {
+        "name": "COLOR_PAIRS",
+        "description": "Module-level constant: dict[str, int]. Maps semantic color role names to curses color pair indices (1–10). Initialized via curses.init_pair() in WslCommander.__init__(). See constants section below for full mapping."
+      },
+      {
+        "name": "Mode enum",
+        "description": "Internal to WslCommander. Values: NORMAL=0 (default, file browsing), INPUT=1 (text input for mkdir/rename/filter), CONFIRM=2 (yes/no confirmation for delete/overwrite), VIEW=3 (file viewer active). Controls input dispatch routing."
+      }
+    ],
+    "config_schema": {}
+  },
+  "interface": {
+    "type": "cli",
+    "cli": {
+      "entry": "python3 lcom",
+      "alternative_entry": "./lcom",
+      "arguments": [],
+      "exit_codes": {
+        "0": "Success — application ran and exited normally (quit via F10, q, or Q).",
+        "1": "Error — fatal startup error (e.g., curses module not available, terminal does not support required features, unhandled exception). Error details printed to stderr before exit."
+      }
+    },
+    "api": {},
+    "input_contract": {
+      "type": "keyboard",
+      "description": "All user interaction is via keyboard input processed by curses stdscr.getch(). No mouse support in v1. No CLI arguments in v1.",
+      "keyboard_mapping": {
+        "navigation": {
+          "KEY_UP": "Move selection up one row in active panel",
+          "KEY_DOWN": "Move selection down one row in active panel",
+          "KEY_PPAGE": "Move selection up by one visible page in active panel",
+          "KEY_NPAGE": "Move selection down by one visible page in active panel",
+          "KEY_HOME": "Move selection to first listed item in active panel",
+          "KEY_END": "Move selection to last listed item in active panel"
+        },
+        "panel_switching": {
+          "Tab (\\t)": "Switch active pane between left (0) and right (1)"
+        },
+        "directory_traversal": {
+          "Enter (\\n)": "Enter highlighted directory in active panel; submit input in dialog mode",
+          "KEY_BACKSPACE": "Go to parent directory in active panel; delete last character in text input dialogs",
+          "Esc (27)": "Go to parent directory in normal mode; cancel active dialog/viewer in modal mode"
+        },
+        "file_operations": {
+          "KEY_F3": "View highlighted file in full-screen pager (FileViewer)",
+          "KEY_F5": "Copy selected item(s) from active panel to inactive panel directory",
+          "KEY_F6": "Move selected item(s) from active panel to inactive panel directory; start rename flow",
+          "KEY_F7": "Create directory dialog (prompt for name, create in active panel)",
+          "KEY_F8": "Delete confirmation dialog for selected item(s)"
+        },
+        "application_control": {
+          "KEY_F10": "Quit application",
+          "q": "Quit application (normal mode only)",
+          "Q": "Quit application (normal mode only)",
+          "KEY_F2": "Cycle sort key (name → extension → size → date → name)",
+          "Ctrl+R (18)": "Refresh active panel file list (re-read directory)",
+          "Ctrl+S (19)": "Quick search/filter dialog (prompt for fnmatch wildcard pattern)",
+          "Ctrl+H (8)": "Toggle display of hidden files (dotfiles) in active panel",
+          "Ctrl+\\\\ (28)": "Go to filesystem root directory (/) in active panel",
+          "Ctrl+D (4)": "Prompt for directory path to navigate to in active panel"
+        },
+        "dialog_interactions": {
+          "y": "Confirm destructive action in CONFIRM dialog (delete, overwrite)",
+          "Y": "Confirm destructive action in CONFIRM dialog",
+          "n": "Cancel destructive action in CONFIRM dialog",
+          "N": "Cancel destructive action in CONFIRM dialog",
+          "Enter": "Submit text input in INPUT dialog; accept default No in CONFIRM dialog",
+          "Esc": "Cancel dialog and return to NORMAL mode",
+          "Printable characters": "Append character to input buffer in INPUT dialogs",
+          "KEY_BACKSPACE": "Delete last character from input buffer in INPUT dialogs"
+        },
+        "viewer_controls": {
+          "KEY_UP": "Scroll up one line",
+          "KEY_DOWN": "Scroll down one line",
+          "KEY_PPAGE": "Scroll up one page",
+          "KEY_NPAGE": "Scroll down one page",
+          "KEY_HOME": "Jump to top of file",
+          "KEY_END": "Jump to bottom of file",
+          "q / Q / Esc / F3 / F10": "Exit viewer and return to NORMAL mode"
+        }
+      }
+    },
+    "output_contract": {
+      "type": "tui_display",
+      "description": "All output is rendered to the terminal via curses. The screen layout is: header bar (rows 0–1), dual file panels (rows 2 to height-3), status bar (last row). Panel width is half the terminal columns minus separator. Colors use curses color pairs. No stdout logging in v1 — all operational feedback is displayed in the status bar or modal dialogs."
+    },
+    "error_handling": "Use try/except around all file operations and curses calls. Errors are displayed as status bar messages (never as terminal-breaking tracebacks). Fatal startup errors (missing curses, terminal too small) print to stderr before TUI starts. Unicode errors use surrogateescape/errors='replace'. Permission errors leave current state unchanged. Terminal resize is handled via curses.KEY_RESIZE with full geometry recalculation."
+  },
+  "implementation_rules": {
+    "coding_style": "PEP 8",
+    "docstrings": "Google style",
+    "type_hints": "Required on all function signatures",
+    "testing_required": false,
+    "test_framework": "none",
+    "test_coverage_target": "none",
+    "max_file_length_lines": 1200,
+    "import_order": ["__future__", "stdlib", "third_party", "local"],
+    "no_broaden_scope": true,
+    "no_rename_unrelated": true,
+    "no_refactor_unrelated": true,
+    "auto_fix_on_violation": true,
+    "lint_tools": ["ruff"],
+    "format_tools": ["ruff format"],
+    "auto_fix_sequence": [
+      "ruff check --fix lcom",
+      "ruff format lcom"
+    ],
+    "max_auto_fix_attempts": 3,
+    "stop_and_report": {
+      "enabled": true,
+      "description": "As a 12B parameter model, NEVER guess or hallucinate missing details. When any trigger condition below is met, STOP implementation immediately and report the ambiguity to the Orchestrator. Do NOT write placeholder code. Do NOT guess defaults.",
+      "trigger_conditions": [
+        "function signature is missing return type or parameter types in design.json",
+        "error handling strategy is not specified for a specific operation (e.g., what to do when copy_file encounters ENOSPC/disk full mid-copy, what to do when shutil.copytree encounters a broken symlink, what to do when os.rename fails with EXDEV/cross-device, what to do when shutil.rmtree encounters permission error on a subdirectory)",
+        "a variable or constant value is referenced in design but not defined (e.g., a COLOR_PAIRS key is used but not listed in the constants, a KEYBINDINGS action name has no handler method)",
+        "edge case behavior is ambiguous (e.g., what happens when user tries to copy a file to a destination where a file with the same name already exists and the overwrite dialog is dismissed, what happens when terminal width is odd and panels have unequal width, behavior when cursor is on '..' parent entry vs Backspace key for going up, what to render when terminal height is exactly HEADER_HEIGHT + STATUS_HEIGHT with 0 visible file rows, what to do when active panel has 0 files and user presses F5/F6/F8, behavior when copy/move destination is same as source directory, what to render when panel width < PANEL_MIN_WIDTH)",
+        "interface contract is incomplete (e.g., exit code for SIGTERM/SIGINT not specified, behavior when curses.wrapper catches KeyboardInterrupt not specified, status bar message format for multi-file operations not specified, confirmation dialog exact text for multi-file delete not specified, what the viewer shows when file is empty vs binary vs unreadable not fully distinct)",
+        "a file dependency exists but its content contract is unknown (e.g., curses module availability — what if import curses succeeds but terminal does not support colors, what if curses.COLORS < 8, what if terminal does not support KEY_F* constants)",
+        "any constraint contradicts another in the design (e.g., 'no external pip packages' vs 'type hints required' — typing module is stdlib so OK; 'single file' vs 'import_order includes third_party' — there are no third-party imports so this is vacuous; verify no other contradictions)",
+        "sort behavior when directories-before-files grouping conflicts with reverse sort (should directories still be first? design says yes — verify both FilePanel.sort_by and FilePanel.toggle_sort implementations agree)",
+        "behavior when a file panel has files but get_selected_path is called while cursor_index is out of bounds after an external file deletion between load_dir and get_selected_path call",
+        "what key to use for toggling sort direction (ascending/descending) — Shift+F2 is mentioned in UI doc but not mapped in KEYBINDINGS, need to clarify",
+        "what happens when user presses Enter on a file (not directory) in NORMAL mode — UI doc says 'v1 reserves F3 for view', but KEYBINDINGS maps Enter to 'enter_dir' which on a file would be a no-op; explicitly define enter_directory behavior for regular files",
+        "whether symlink-to-directory should show as directory or symlink in file list, and whether enter_directory should follow it — architecture says os.path.isdir() follows symlinks, need to confirm",
+        "status bar message lifetime: transient messages (error feedback) vs persistent (sort/filter state) — need explicit priority and duration rules",
+        "copy progress callback: how is progress rendered? status bar message updated per-chunk? What granularity?",
+        "terminal resize during modal dialog: should dialog be redrawn at new center or dismissed?",
+        "UTF-8 filenames with wide characters (CJK): wcwidth/wcswidth not in Python stdlib — how to calculate display width for truncation?"
+      ],
+      "action_on_trigger": "STOP. Do NOT write placeholder code, do NOT guess defaults. Output a structured report to the Orchestrator listing exactly which specification lines are ambiguous, contradictory, or missing. Wait for the Orchestrator to update design.json before resuming.",
+      "report_format": {
+        "type": "stop_and_report",
+        "trigger_field": "which field in design.json",
+        "ambiguity": "exact description of what is missing or contradictory",
+        "blocked_file": "path of the file being implemented when stop occurred",
+        "suggested_fix": "what the Orchestrator should clarify (e.g., 'specify exit code for file-not-found', 'add error_handling.disk_full field')"
+      }
+    }
+  },
+  "constants": {
+    "KEYBINDINGS": {
+      "type": "dict[int, str]",
+      "description": "Maps curses raw key codes to semantic action name strings. Defined at module level. Consumed by WslCommander.handle_input() for dispatching keystrokes to handler methods.",
+      "values": {
+        "curses.KEY_UP": "nav_up",
+        "curses.KEY_DOWN": "nav_down",
+        "curses.KEY_PPAGE": "nav_pgup",
+        "curses.KEY_NPAGE": "nav_pgdn",
+        "curses.KEY_HOME": "nav_home",
+        "curses.KEY_END": "nav_end",
+        "9": "switch_panel",
+        "10": "enter_dir",
+        "curses.KEY_BACKSPACE": "go_up",
+        "27": "go_up",
+        "curses.KEY_F3": "view",
+        "curses.KEY_F5": "copy",
+        "curses.KEY_F6": "move",
+        "curses.KEY_F7": "mkdir",
+        "curses.KEY_F8": "delete",
+        "curses.KEY_F10": "quit",
+        "113": "quit",
+        "81": "quit",
+        "18": "refresh",
+        "curses.KEY_F2": "sort_toggle",
+        "19": "filter",
+        "8": "toggle_hidden",
+        "28": "goto_root",
+        "4": "goto_path"
+      }
+    },
+    "COLOR_PAIRS": {
+      "type": "dict[str, int]",
+      "description": "Maps semantic color role names to curses color pair indices (1-10). Colors are initialized in WslCommander.__init__() via curses.init_pair(index, foreground, background). If terminal does not support colors (curses.COLORS < 8), all color usage is degraded to curses.A_BOLD, curses.A_DIM, and curses.A_REVERSE attributes.",
+      "values": {
+        "header": {"index": 1, "fg": "COLOR_WHITE", "bg": "COLOR_BLUE"},
+        "active_panel": {"index": 2, "fg": "COLOR_WHITE", "bg": "COLOR_BLACK"},
+        "inactive_panel": {"index": 3, "fg": "COLOR_WHITE", "bg": "COLOR_BLACK", "attr": "A_DIM"},
+        "selected": {"index": 4, "fg": "COLOR_BLACK", "bg": "COLOR_WHITE"},
+        "directory": {"index": 5, "fg": "COLOR_CYAN", "bg": "COLOR_BLACK", "attr": "A_BOLD"},
+        "executable": {"index": 6, "fg": "COLOR_GREEN", "bg": "COLOR_BLACK"},
+        "symlink": {"index": 7, "fg": "COLOR_MAGENTA", "bg": "COLOR_BLACK"},
+        "status": {"index": 8, "fg": "COLOR_WHITE", "bg": "COLOR_BLUE"},
+        "error": {"index": 9, "fg": "COLOR_RED", "bg": "COLOR_BLACK", "attr": "A_BOLD"},
+        "dialog": {"index": 10, "fg": "COLOR_WHITE", "bg": "COLOR_BLACK"}
+      }
+    },
+    "HEADER_HEIGHT": {
+      "type": "int",
+      "value": 2,
+      "description": "Number of terminal rows reserved for the header bar (directory path display + column labels). Row 0: program name and current directory paths. Row 1: column labels (Name, Size, Date, Perm)."
+    },
+    "STATUS_HEIGHT": {
+      "type": "int",
+      "value": 1,
+      "description": "Number of terminal rows reserved for the status bar at the bottom of the screen. Shows key hints, file count, total size, sort/filter indicators, and transient messages."
+    },
+    "SEPARATOR_WIDTH": {
+      "type": "int",
+      "value": 1,
+      "description": "Width in columns of the vertical separator between left and right panels. The separator occupies column (total_cols // 2) and is drawn with the PANEL_SEPARATOR character ('│')."
+    },
+    "PANEL_MIN_WIDTH": {
+      "type": "int",
+      "value": 20,
+      "description": "Minimum column width per panel before the application considers the terminal too narrow. If total_cols < 2 * PANEL_MIN_WIDTH + SEPARATOR_WIDTH, panels render in truncated mode (only filename shown, size/date/perm columns omitted)."
+    },
+    "PANEL_SEPARATOR": {
+      "type": "str",
+      "value": "│",
+      "description": "Unicode box-drawing character used for the vertical separator between panels."
+    },
+    "VIEWER_MAX_SIZE": {
+      "type": "int",
+      "value": 1048576,
+      "description": "Maximum file size in bytes (1 MB) that the built-in file viewer will attempt to load. Files larger than this show 'File too large to display (>1 MB)'."
+    },
+    "COPY_BUFFER_SIZE": {
+      "type": "int",
+      "value": 65536,
+      "description": "Buffer size in bytes (64 KB) for chunked file copy operations."
+    },
+    "DEFAULT_SORT_KEY": {
+      "type": "str",
+      "value": "name",
+      "description": "Default sort key for new FilePanel instances. One of: 'name', 'extension', 'size', 'date'."
+    }
+  },
+  "file_operations": {
+    "description": "Top-level (module-level) stateless functions that perform file system operations. All return bool (True on success, False on failure). Errors are caught internally and reported via return value; callers display the error in the status bar. These functions do NOT interact with curses directly.",
+    "functions": [
+      {
+        "name": "copy_file",
+        "signature": "def copy_file(src: str, dst: str, progress_callback: Callable[[int, int], None] | None = None) -> bool",
+        "description": "Copy a single file from src to dst. Opens src in binary read mode, dst in binary write mode. Copies in chunks of COPY_BUFFER_SIZE bytes. Calls progress_callback(bytes_copied, total_bytes) after each chunk. Uses shutil.copy2 for a simpler alternative if progress tracking is not needed. Returns False on any OSError (permission denied, disk full, file not found, etc.). Does NOT handle directory copy — caller must detect directories and use shutil.copytree.",
+        "args": {
+          "src": "str — Absolute path to source file.",
+          "dst": "str — Absolute path to destination file (including filename).",
+          "progress_callback": "Callable[[int, int], None] | None — Optional callback receiving (bytes_copied, total_bytes). Called after each chunk. None if no progress needed."
+        },
+        "returns": "bool — True on successful copy, False on any OSError or IOError."
+      },
+      {
+        "name": "move_file",
+        "signature": "def move_file(src: str, dst: str, progress_callback: Callable[[int, int], None] | None = None) -> bool",
+        "description": "Move a file or directory from src to dst. Attempts os.rename(src, dst) first (fast, atomic on same filesystem). If raises OSError with errno.EXDEV (cross-device link), falls back to copy_file + os.remove for files, or shutil.copytree + shutil.rmtree for directories with progress reporting. Returns False on any OSError. If fallback copy succeeds but final remove of source fails, returns False with partial state (destination exists, source may still exist).",
+        "args": {
+          "src": "str — Absolute path to source file or directory.",
+          "dst": "str — Absolute path to destination.",
+          "progress_callback": "Callable[[int, int], None] | None — Called during cross-filesystem copy phase only."
+        },
+        "returns": "bool — True on successful move, False on any failure."
+      },
+      {
+        "name": "delete_file",
+        "signature": "def delete_file(path: str) -> bool",
+        "description": "Delete a file or directory. For regular files, uses os.remove(path). For directories, uses shutil.rmtree(path, ignore_errors=False). For symlinks, uses os.unlink(path) to remove the link (not the target). Returns True on success. Returns False and does not raise on OSError (permission denied, directory not empty, file not found). Caller is responsible for confirmation — this function performs the deletion unconditionally.",
+        "args": {
+          "path": "str — Absolute path to the file or directory to delete."
+        },
+        "returns": "bool — True on successful deletion, False on any OSError."
+      },
+      {
+        "name": "create_directory",
+        "signature": "def create_directory(path: str) -> bool",
+        "description": "Create a directory at path. Uses os.makedirs(path, exist_ok=False). Returns True on success. Returns False if directory already exists (FileExistsError), permission denied (PermissionError), parent path does not exist (FileNotFoundError), or any other OSError. Does NOT create intermediate directories if the parent does not exist (rejects with False). Caller must validate the path before calling.",
+        "args": {
+          "path": "str — Absolute path of the directory to create."
+        },
+        "returns": "bool — True on creation, False on FileExistsError, PermissionError, FileNotFoundError, or OSError."
+      },
+      {
+        "name": "rename_file",
+        "signature": "def rename_file(old: str, new: str) -> bool",
+        "description": "Rename a file or directory from old to new. Uses os.rename(old, new). Returns True on success. Returns False if new already exists (FileExistsError), permission denied (PermissionError), old does not exist (FileNotFoundError), cross-device rename not possible (OSError with errno.EXDEV), or any other OSError. Cross-device renames are not supported — caller should use move_file for that case.",
+        "args": {
+          "old": "str — Current absolute path.",
+          "new": "str — New absolute path."
+        },
+        "returns": "bool — True on successful rename, False on any error."
+      }
+    ]
+  }
+}
