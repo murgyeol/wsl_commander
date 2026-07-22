@@ -458,10 +458,32 @@ class FileViewer:
     def load(self):
         self.lines = []
         try:
+            import zipfile
+            import tarfile
+            import mimetypes
+            if zipfile.is_zipfile(self.path):
+                self.lines = [f"=== Archive Content (ZIP): {os.path.basename(self.path)} ===", ""]
+                with zipfile.ZipFile(self.path, "r") as zf:
+                    for info in zf.infolist():
+                        kind = "<DIR>" if info.is_dir() else f"{info.file_size:,} B"
+                        self.lines.append(f"{info.filename:<50} {kind}")
+                self.message = "Archive view (ZIP)"
+                return
+            elif tarfile.is_tarfile(self.path):
+                self.lines = [f"=== Archive Content (TAR): {os.path.basename(self.path)} ===", ""]
+                with tarfile.open(self.path, "r:*") as tf:
+                    for member in tf.getmembers():
+                        kind = "<DIR>" if member.isdir() else f"{member.size:,} B"
+                        self.lines.append(f"{member.name:<50} {kind}")
+                self.message = "Archive view (TAR)"
+                return
+
             with open(self.path, "rb") as f:
                 data = f.read(8 * 1024 * 1024)
             if b"\x00" in data[:4096]:
-                self.lines = self._hex_dump(data)
+                mime, _ = mimetypes.guess_type(self.path)
+                header_info = f"Binary / Media view ({mime or 'unknown format'})"
+                self.lines = [f"=== {header_info} ===", ""] + self._hex_dump(data)
                 self.message = "Binary view: first 8 MiB"
                 return
             text = data.decode(_terminal_encoding(), "replace")
@@ -549,7 +571,13 @@ class FileViewer:
     def handle_input(self, key):
         h, w = self.screen.getmaxyx()
         page = max(1, h - 3)
-        if key in (ord("q"), ord("Q"), 27, curses.KEY_F10):
+        if key == curses.KEY_RESIZE:
+            curses.update_lines_cols()
+            try:
+                self.screen.clear()
+            except curses.error:
+                pass
+        elif key in (ord("q"), ord("Q"), 27, curses.KEY_F10):
             self.running = False
         elif key == curses.KEY_UP:
             self.offset_y -= 1
@@ -575,10 +603,10 @@ class FileViewer:
 class WslCommander(App):
     def __init__(self, screen):
         App.__init__(self, screen)
-        self.left = FilePanel(os.getcwd(), "L")
-        self.right = FilePanel(os.path.expanduser("~"), "R")
-        if not os.path.isdir(self.right.dir):
-            self.right = FilePanel(os.getcwd(), "R")
+        home_dir = os.path.expanduser("~")
+        win_c = "/mnt/c" if os.path.exists("/mnt/c") else home_dir
+        self.left = FilePanel(home_dir, "L")
+        self.right = FilePanel(win_c, "R")
         self.active = self.left
         self.inactive = self.right
         self.setup_curses()
@@ -615,7 +643,15 @@ class WslCommander(App):
         panel = self.active
         h, w = self.screen.getmaxyx()
         list_h = max(1, h - 4)
-        if key == curses.KEY_UP:
+        if key == curses.KEY_RESIZE:
+            curses.update_lines_cols()
+            try:
+                self.screen.clear()
+            except curses.error:
+                pass
+            self.draw()
+            return
+        elif key == curses.KEY_UP:
             panel.navigate(-1, 1)
         elif key == curses.KEY_DOWN:
             panel.navigate(1, 1)

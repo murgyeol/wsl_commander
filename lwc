@@ -1,4 +1,4 @@
 #!/bin/bash
 # WSL-Windows Commander 실행용 리눅스 배치 스크립트
-
-python3 /home/won/wsl-commander/wsl_commander.py "$@"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+python3 "$SCRIPT_DIR/wsl_commander.py" "$@"

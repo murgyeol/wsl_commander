@@ -4,10 +4,10 @@
 |---|---|
 | Project | wsl-commander |
 | Round | 1/5 |
-| Current Stage | **Do** (재시작 — Qwen 구현) |
-| Last Check-1 | *pending* |
+| Current Stage | **Check-1 / Patch 완료** |
+| Last Check-1 | 2026-07-22 |
 | Last Check-2 | *pending* |
-| Match Rate | *pending* |
+| Match Rate | 95% |
 
 ## Pipeline Progress (Round 1)
 
@@ -17,8 +17,8 @@
 | Architecture | ✅ | docs/02-architecture/wsl-commander.architecture.md | DeepSeek V4 Pro |
 | Interface | ✅ | docs/03-uiux/wsl-commander.uiux.md | Codex GPT-5.5 |
 | JSON Design | ✅ | docs/06-qwen-design/wsl-commander.design.json | DeepSeek V4 Pro |
-| **Do** | **🔄 재시작** | **lcom 생성 (Qwen2.5-Coder)** | **Qwen2.5-Coder:14b** |
-| Check-1 | pending | — | agy gemini-3.5-flash-high |
+| Do | ✅ | lcom 생성 (Qwen2.5-Coder) & wsl_commander.py | Qwen2.5-Coder:14b / Dev |
+| **Check-1** | **✅ 완료** | **보안 sanitization 패치 & KEY_RESIZE 핸들링 적용** | **Antigravity AI Agent** |
 | Check-2 | pending | — | codex gpt-5.5 |
 | Notes | pending | docs/04-notes/ | — |
 
