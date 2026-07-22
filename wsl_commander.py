@@ -36,6 +36,18 @@ def sanitize_path(path):
     except Exception:
         return None
 
+last_heartbeat = time.time()
+
+def heartbeat_checker():
+    """브라우저 탭/창이 닫혀서 8초 이상 하트비트 응답이 없으면 서버 자동 종료"""
+    global last_heartbeat
+    while True:
+        time.sleep(2)
+        if time.time() - last_heartbeat > 8:
+            os._exit(0)
+
+threading.Thread(target=heartbeat_checker, daemon=True).start()
+
 class CommanderHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         pass # 터미널 로그 간소화
@@ -43,6 +55,16 @@ class CommanderHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         parsed_url = urllib.parse.urlparse(self.path)
         path_query = urllib.parse.parse_qs(parsed_url.query)
+
+        # API: 브라우저 생존 신호 (Heartbeat Ping)
+        if parsed_url.path == "/api/heartbeat":
+            global last_heartbeat
+            last_heartbeat = time.time()
+            self.send_response(200)
+            self.send_header('Content-Type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b"OK")
+            return
 
         # API: 초기 설정 정보 (사용자 홈 디렉토리 및 Windows C드라이브)
         if parsed_url.path == "/api/init":
@@ -1553,6 +1575,10 @@ HTML_TEMPLATE = """
         document.getElementById('right-path').addEventListener('keypress', (e) => {
             if (e.key === 'Enter') loadDir('right', e.target.value);
         });
+
+        setInterval(() => {
+            fetch('/api/heartbeat').catch(() => {});
+        }, 3000);
 
         window.onload = async () => {
             try {
