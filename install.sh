@@ -1,6 +1,6 @@
 #!/bin/bash
 # WSL Commander One-Liner Installer script
-# Usage: curl -sSL https://raw.githubusercontent.com/murgyeol/wsl_commander/main/install.sh | bash
+# Usage: curl -fsSL https://raw.githubusercontent.com/murgyeol/wsl_commander/main/install.sh | bash
 
 set -e
 
@@ -29,16 +29,17 @@ chmod +x "$INSTALL_DIR/wsl_commander.py"
 mkdir -p "$BIN_DIR"
 ln -sf "$INSTALL_DIR/lwc" "$BIN_DIR/lwc"
 
+# 4. PATH 환경변수 자동 추가 (어디서나 lwc 입력 시 즉시 실행되도록)
+if [ -f "$HOME/.bashrc" ]; then
+    grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+fi
+if [ -f "$HOME/.zshrc" ]; then
+    grep -q 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.zshrc" || echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.zshrc"
+fi
+
 echo ""
 echo "🎉 WSL Commander가 성공적으로 설치되었습니다!"
 echo "--------------------------------------------------"
-echo "💡 어떤 디렉토리에서든 다음 명령어로 실행할 수 있습니다:"
+echo "💡 터미널에서 다음 단축 명령어 하나로 바로 실행할 수 있습니다:"
 echo "   $ lwc"
 echo "--------------------------------------------------"
-
-# PATH 안내
-if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
-    echo "⚠️  참고: $BIN_DIR 경로가 PATH에 포함되어 있지 않습니다."
-    echo "   ~/.bashrc 또는 ~/.zshrc 에 아래 문장을 추가해 주세요:"
-    echo "   export PATH=\"\$HOME/.local/bin:\$PATH\""
-fi
