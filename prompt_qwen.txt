@@ -1,0 +1,46 @@
+You are a Qwen2.5-Coder:14b model. Generate a COMPLETE working Python curses TUI dual-pane file manager for Linux/WSL called "Wsl Commander". Output ONLY the Python code, no markdown fences, no explanations.
+
+Write it to /home/won/wsl-commander/lcom with #!/usr/bin/env python3 shebang.
+Standard library ONLY: curses, os, shutil, stat, time, fnmatch, sys, locale
+
+CLASSES:
+- App: __init__(screen), set_message(text,seconds=3), clear_message_if_expired(), safe_addstr(y,x,text,attr,width), fill_line(y,attr)
+- WslCommander(App): __init__(screen), setup_curses(), run(), handle_input(key), switch_panel(), refresh_panels(), draw(), draw_header(), draw_panels(), draw_panel(panel, y,x,width,height,active), _draw_panel_header(), _draw_entry(), _format_columns(name,size,date,perm,width), draw_status_bar(), draw_dialog(title,msg,buf,confirm), _confirm_dialog(title,msg), _input_dialog(title,msg,initial), show_viewer(), _progress_cb(src,dst,done,total), copy_proc(), move_proc(), delete_proc(), mkdir_proc(), rename_proc(), filter_proc()
+- FilePanel: __init__(dir,id), load_dir() re-reads dir, apply_filter_and_sort(), sort_entries(), navigate(dir,count), _clamp_selection(), ensure_visible(height), enter_directory(), go_up(), get_selected_entry(), get_selected_path(), sort_by(key), toggle_sort(), set_filter(p), clear_filter()
+- FileViewer: __init__(path), load(), _hex_dump(data), run(), _standalone_run(screen), draw(), handle_input(key)
+
+KEYBOARD:
+- Up/Down/PgUp/PgDn/Home/End: navigate active panel | Tab(9): switch pane
+- Enter(10/13): enter dir | Backspace(KEY_BACKSPACE/127/8): parent | Esc(27): parent/cancel
+- F2: cycle sort (name->ext->size->date, toggles reverse after full cycle)
+- F3: view file (FileViewer pager) | F5: copy to other pane | F6: move/rename | F7: mkdir | F8: delete(y/N) | F10/q: quit
+- Ctrl+S(19): filter dialog | Ctrl+R(18): refresh
+- Ctrl+H(8): toggle hidden | Ctrl+\(28): goto root / | Ctrl+D(4): goto dir prompt
+
+LAYOUT (top to bottom):
+1. Row 0: Header "Wsl Commander [L] /path [R] /other-path" colored
+2. Row 1: column labels "Name         Size Date        Perm"
+3. Rows 2..h-2: Two panels with '│' separator at mid, each scrollable
+4. Row h-1: Status bar with "F3 View F5 Copy F6 Move F7 MkDir F8 Delete F10 Quit"
+
+Each entry shows: name (dirs in [name] format), size (<DIR> or formatted), date, permissions
+Dirs grouped before files. Directories shown with attr BOLD. UTF-8 safe.
+
+COLORS via init_pair (10 pairs): header(1)=white/blue|active_panel(2)=white/black|inactive_panel(3)=white/black A_DIM|selected(4)=black/white|directory(5)=cyan/black A_BOLD|executable(6)=green/black|symlink(7)=magenta/black|status(8)=white/blue|error(9)=red/black A_BOLD|dialog(10)=white/black
+
+DIALOGS: centered modal boxes.
+- confirm(y/N): title "Delete", msg "Delete filename? (y/N)". y/Y=yes, n/N/Esc=no, Enter=No
+- input: title "Copy/Move/MkDir/Rename/Filter", msg, text buffer, Enter=submit, Esc=cancel
+
+FILE OPS:
+- copy_file(src,dst,cb): binary chunked copy with progress | move_file(src,dst,cb): rename then fallback copy+delete | delete_file(path): os.remove/os.unlink/shutil.rmtree | create_directory(path): os.makedirs | rename_file(old,new): os.rename
+- All return bool True on success, False on failure. Caller handles status messages.
+
+FORMAT HELPERS:
+- format_size(b): binary 1024 scale, B/K/M/G/T, <DIR> placeholder
+- format_date(ts): same year="MM-DD HH:MM", older="YYYY-MM-DD"
+- format_permissions(mode): 10-char Unix string using stat.filemode
+
+CONSTANTS: HEADER_HEIGHT=2, STATUS_HEIGHT=1, SEPARATOR_WIDTH=1, PANEL_MIN_WIDTH=20, VIEWER_MAX_SIZE=1048576, COPY_BUFFER_SIZE=65536, DEFAULT_SORT_KEY='name', SORT_KEYS=['name','ext','size','date']
+
+Write a fully working 800-1000 line file. Make it executable.
